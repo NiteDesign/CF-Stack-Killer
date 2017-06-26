@@ -1,7 +1,7 @@
-# Lambda-AWS-CF-Stack-Killer
+# CF-Stack-Killer
 AWS Lambda that notifies via Slack message of Dev CloudFormation stacks to delete EOD to save money.  
 Please refer to this post for additional information:  
-https://www.nitedesign.com/save-money-delete-your-stacks-using-lambdas-and-interactive-slack-messages  
+https://www.nitedesign.com/cf-stack-killer 
 
 1. Create a Slack App
 2. Copy the Lambda code and Zip each .js file to and individual zip file.
