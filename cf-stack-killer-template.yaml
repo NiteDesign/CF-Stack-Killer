@@ -1,0 +1,431 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description:
+  "CF stack killer: Creates Lambdas, IAM role, and API Gateway"
+
+Parameters:
+
+  cronSlackNotify:
+    Type: String
+    Description: "Provide a cron expression for when to send the notification to slack, ie. 30 21 * * ? *"
+    Default: "30 21 * * ? *"
+
+  cronDeleteStacks:
+    Type: String
+    Description: "Provide a cron expression for when the delete stacks lambda should run, ie. 30 21 * * ? *"
+    Default: "0 22 * * ? *"
+
+  dynamoDBTableName:
+    Type: String
+    Description: "Provide the name to create DynamoDB table"
+
+  queryString:
+    Type: String
+    Description: "Provide the string to search for CloudFormation stack names to delete"
+
+  slackChannel:
+    Type: String
+    Description: "Provide the name of the Slack Channel to post to"
+
+  slackChannelId:
+    Type: String
+    Description: "Provide the Id of the Slack Channel to post to"
+
+  slackDomain:
+    Type: String
+    Description: "Provide the Slack Domain name"
+
+  slackHookUrl:
+    Type: String
+    Description: "Provide the Slack WebHook URL for the Slack App"
+
+  slackTeamId:
+    Type: String
+    Description: "Provide the Slack Team Id"
+
+  s3Bucket:
+    Type: String
+    Description: "Provide the bucket where the Lambda zips will reside"
+
+  LambdaNotifyCode:
+    Type: String
+    Description: "Provide S3 Key for the Notify Lambda code zip file"
+
+  LambdaSlackButtonResponseCode:
+    Type: String
+    Description: "Provide S3 Key for the Slack Button Response Lambda code zip file"
+
+  LambdaDeleteStacksCode:
+    Type: String
+    Description: "Provide S3 Key for the Delete Stacks Lambda code zip file"
+
+Resources:
+
+  CFKillerNotifyRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Join:
+        - ''
+        - - "CF-Killer-Notify-"
+          - Ref: AWS::Region
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Principal:
+            Service:
+            - "lambda.amazonaws.com"
+            - "apigateway.amazonaws.com"
+          Action:
+          - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-CF-Killer-Notify"
+            - Ref: AWS::Region
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - dynamodb:DeleteItem
+            - dynamodb:GetItem
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Scan
+            Effect: Allow
+            Resource:
+            - Fn::Join:
+              - ''
+              - - "arn:aws:dynamodb:"
+                - Ref: AWS::Region
+                - ":"
+                - Ref: AWS::AccountId
+                - ":table/"
+                - Ref: dynamoDBTableName
+          - Action:
+            - cloudformation:ListStacks
+            Effect: Allow
+            Resource: "*"
+
+  CFKillerDeleteStacksRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Join:
+        - ''
+        - - "CF-Killer-Delete-Stacks-"
+          - Ref: AWS::Region
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+        - Effect: "Allow"
+          Principal:
+            Service:
+            - "lambda.amazonaws.com"
+          Action:
+          - "sts:AssumeRole"
+      Path: "/"
+      ManagedPolicyArns:
+      - "arn:aws:iam::aws:policy/ReadOnlyAccess"
+      - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+      - PolicyName:
+          Fn::Join:
+          - ''
+          - - Ref: AWS::StackName
+            - "-CF-Killer-DeleteStacks"
+            - Ref: AWS::Region
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action:
+            - dynamodb:DeleteItem
+            - dynamodb:GetItem
+            - dynamodb:GetRecords
+            - dynamodb:PutItem
+            - dynamodb:UpdateItem
+            - dynamodb:Scan
+            Effect: Allow
+            Resource:
+            - Fn::Join:
+              - ''
+              - - "arn:aws:dynamodb:"
+                - Ref: AWS::Region
+                - ":"
+                - Ref: AWS::AccountId
+                - ":table/"
+                - Ref: dynamoDBTableName
+          - Action:
+            - cloudformation:DeleteStack
+            Effect: Allow
+            Resource:
+            - Fn::Join:
+              - ''
+              - - "arn:aws:cloudformation:"
+                - Ref: AWS::Region
+                - ":"
+                - Ref: AWS::AccountId
+                - ":stack/*"
+                - Ref: queryString
+                - "*"
+
+  LambdaNotify:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        S3Bucket:
+          Ref: s3Bucket
+        S3Key:
+          Ref: LambdaNotifyCode
+      Description: "Queries the CF stack names and sends a Slack message"
+      FunctionName: "CF-Killer-Notify"
+      Handler: "cf-stack-killer-slack-notification.handler"
+      Environment:
+        Variables:
+          dynamoDBTable:
+            Ref: dynamoDBTableName
+          slackChannel:
+            Ref: slackChannel
+          slackHookURL:
+            Ref: slackHookUrl
+          stackName:
+            Ref: queryString
+      Role:
+        Fn::GetAtt:
+          - CFKillerNotifyRole
+          - Arn
+      MemorySize: 128
+      Runtime: "nodejs6.10"
+      Timeout: 15
+
+  LambdaSlackButtonResponse:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        S3Bucket:
+          Ref: s3Bucket
+        S3Key:
+          Ref: LambdaSlackButtonResponseCode
+      Description: "Responds to Slack button, updates DynamoDB for retention is true and updates Slack message"
+      FunctionName: "CF-Killer-Slack-Button-Response"
+      Handler: "cf-stack-killer-slack-button-response.handler"
+      Environment:
+        Variables:
+          dynamoDBTable:
+            Ref: dynamoDBTableName
+          slackChannelID:
+            Ref: slackChannelId
+          slackChannelName:
+            Ref: slackChannel
+      Role:
+        Fn::GetAtt:
+          - CFKillerNotifyRole
+          - Arn
+      MemorySize: 128
+      Runtime: "nodejs6.10"
+      Timeout: 15
+
+  LambdaDeleteStacks:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Code:
+        S3Bucket:
+          Ref: s3Bucket
+        S3Key:
+          Ref: LambdaDeleteStacksCode
+      Description: "Queries DynamoDB, deletes stacks, and sends message to Slack"
+      FunctionName: "CF-Killer-Delete-Stacks"
+      Handler: "cf-stack-killer-delete-stacks.handler"
+      Environment:
+        Variables:
+          dynamoDBTable:
+            Ref: dynamoDBTableName
+          slackChannel:
+            Ref: slackChannel
+          slackHookURL:
+            Ref: slackHookUrl
+      Role:
+        Fn::GetAtt:
+          - CFKillerDeleteStacksRole
+          - Arn
+      MemorySize: 128
+      Runtime: "nodejs6.10"
+      Timeout: 15
+
+  DynamoDBTable:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      AttributeDefinitions:
+        -
+          AttributeName: "stackname"
+          AttributeType: "S"
+      KeySchema:
+        -
+          AttributeName: "stackname"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+      TableName:
+        Ref: dynamoDBTableName
+
+  APIGatewayRestApi:
+    Type: "AWS::ApiGateway::RestApi"
+    Properties:
+      Description: "CF-Stack-Killer"
+      Name: "CF-Stack-Killer"
+
+  APIGatewayPostMethod:
+    Type: "AWS::ApiGateway::Method"
+    Properties:
+      HttpMethod: "POST"
+      AuthorizationType: NONE
+      ResourceId:
+        Fn::GetAtt:
+          - APIGatewayRestApi
+          - RootResourceId
+      RestApiId:
+        Ref: APIGatewayRestApi
+      Integration:
+        IntegrationHttpMethod: "POST"
+        Type: "AWS"
+        Uri:
+          Fn::Join:
+          - ""
+          - - "arn:aws:apigateway:"
+            - Ref: AWS::Region
+            - ":lambda:path/2015-03-31/functions/"
+            - Fn::GetAtt:
+              - LambdaSlackButtonResponse
+              - Arn
+            - "/invocations"
+        IntegrationResponses:
+          -
+            ResponseTemplates:
+              application/json: "#set($inputRoot = $input.path('$'))"
+            StatusCode: 200
+        PassthroughBehavior: "WHEN_NO_TEMPLATES"
+        RequestTemplates:
+          application/x-www-form-urlencoded:
+            Fn::Join:
+            - ''
+            - - "#set( $requestBody = $input.path('$') )\n"
+              - "#set( $keyValuePairs = $requestBody.split(\"&\") )\n"
+              - "#set( $params = [] )\n"
+              - "#set( $operands = $requestBody.split(\"=\") )\n"
+              - "#if( $operands.size() == 1 || $operands.size() == 2 )\n"
+              - "  #set( $success = $params.add($operands) )\n"
+              - "#end\n"
+              - "#foreach( $param in $params )\n"
+              - "  #set( $key = $util.urlDecode($param[0]) )\n"
+              - "  #if( $param.size() > 1 )\n"
+              - "    #set( $value = $util.urlDecode($param[1]) )\n"
+              - "  #else\n"
+              - "   #set( $value = \"\" )\n"
+              -   "#end\n"
+              - "  $value\n"
+              - "  #if( $foreach.hasNext ),#end\n"
+              - "#end\n"
+      MethodResponses:
+        -
+          StatusCode: "200"
+
+  APIDeployment:
+    Type: "AWS::ApiGateway::Deployment"
+    DependsOn: APIGatewayPostMethod
+    Properties:
+      Description: "Prod"
+      RestApiId:
+        Ref: APIGatewayRestApi
+      StageName: "Prod"
+
+  CloudWatchEventSlackNotify:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Sends a Slack message for stacks to be deleted"
+      Name: "CF-Killer-Slack-Notify"
+      ScheduleExpression:
+        Fn::Join:
+        - ''
+        - - "cron("
+          - Ref: cronSlackNotify
+          - ")"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "LambdaNotify"
+              - "Arn"
+          Id: "Trigger-Notify-Lambda"
+
+  InvokeNotifyLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName:
+        Fn::GetAtt:
+          - "LambdaNotify"
+          - "Arn"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "LambdaNotify"
+          - "Arn"
+
+  InvokeResponseLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName: "CF-Killer-Slack-Button-Response"
+      Principal: "apigateway.amazonaws.com"
+      SourceArn:
+       Fn::Join:
+       - ""
+       - - "arn:aws:execute-api:"
+         - Ref: AWS::Region
+         - ":"
+         - Ref: AWS::AccountId
+         - ":"
+         - Ref: APIGatewayRestApi
+         - "/*"
+
+  CloudWatchEventDeleteStacks:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Description: "Triggers the CF-Killer-Delete-Stacks lambda"
+      Name: "CF-Killer-Delete-Stacks"
+      ScheduleExpression:
+        Fn::Join:
+        - ''
+        - - "cron("
+          - Ref: cronDeleteStacks
+          - ")"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn:
+            Fn::GetAtt:
+              - "LambdaDeleteStacks"
+              - "Arn"
+          Id: "Trigger-DeleteStacks-Lambda"
+
+  InvokeDeleteStacksLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    Properties:
+      Action: "lambda:InvokeFunction"
+      FunctionName:
+        Fn::GetAtt:
+          - "LambdaDeleteStacks"
+          - "Arn"
+      Principal: "events.amazonaws.com"
+      SourceArn:
+        Fn::GetAtt:
+          - "LambdaDeleteStacks"
+          - "Arn"
